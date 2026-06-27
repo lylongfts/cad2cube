@@ -2,7 +2,7 @@
 
 # CAD2Cube
 
-### Free DXF & DWG importer for Blender — with layers, units, and blocks done right
+### Free DXF & DWG importer for Blender — with layers, units, and block instances
 
 [![Blender](https://img.shields.io/badge/Blender-4.2%20–%205.x-orange)](https://www.blender.org/)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
@@ -38,7 +38,7 @@ crashes on modern files, and has no DWG, no layer mapping, and no unit detection
 - **DWG import** — via the free Open Design Alliance File Converter
 - **Smart units** — reads `$INSUNITS` so a 5000 mm wall becomes a 5 m wall automatically
 - **Layers as collections** — keeps the architect's organization intact
-- **Block instancing** — one mesh shared across N references, light on memory
+- **Block instancing** — INSERT entities become Blender collection instances. One mesh shared across N references, light on memory
 - **Auto-recenter & auto-frame** — CAD files with geographic coordinates just work
 - **Layer filtering** — `WALL, DOOR, !DIM_*` include/exclude syntax
 - **Curves stay curves** — splines, arcs, ellipses remain editable, not pre-meshed
@@ -47,7 +47,9 @@ crashes on modern files, and has no DWG, no layer mapping, and no unit detection
 ## Install
 
 ### Blender 4.2+ (recommended)
-1. Download `cad2cube-x.x.x.zip` from [Releases](https://github.com/lylongfts/CAD2CUBE/releases).
+1. Download `cad2cube-x.x.x.zip` from either:
+   - 🟠 **Gumroad** (recommended): [lylongsoul.gumroad.com/l/esyoci](https://lylongsoul.gumroad.com/l/esyoci)
+   - 🐙 **GitHub Releases**: [github.com/lylongfts/CAD2CUBE/releases](https://github.com/lylongfts/CAD2CUBE/releases)
 2. Drag the zip into Blender, or: Edit → Preferences → Get Extensions → Install from Disk.
 3. Done. DXF works immediately.
 
