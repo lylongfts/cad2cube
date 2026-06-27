@@ -39,6 +39,8 @@ crashes on modern files, and has no DWG, no layer mapping, and no unit detection
 - **Smart units** — reads `$INSUNITS` so a 5000 mm wall becomes a 5 m wall automatically
 - **Layers as collections** — keeps the architect's organization intact
 - **Block instancing** — INSERT entities become Blender collection instances. One mesh shared across N references, light on memory
+- **Color by Layer** — tint objects with their CAD layer color in the viewport (object color, not materials — looks like the original drawing)
+- **Three recenter modes** — keep CAD coords, center bounding box, or snap min-corner to origin
 - **Auto-recenter & auto-frame** — CAD files with geographic coordinates just work
 - **Layer filtering** — `WALL, DOOR, !DIM_*` include/exclude syntax
 - **Curves stay curves** — splines, arcs, ellipses remain editable, not pre-meshed

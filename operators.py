@@ -131,6 +131,14 @@ class _CADImportOptions:
         default=False,
     )
 
+    color_by_layer: BoolProperty(
+        name="Color by Layer",
+        description="Tint objects with their CAD layer color in the viewport "
+                    "(object color only — no materials, does not affect render). "
+                    "Makes the import look like the original CAD drawing",
+        default=True,
+    )
+
     skip_hidden_layers: BoolProperty(
         name="Skip Hidden / Frozen Layers",
         description="Skip layers that are off, frozen, or locked in the source file",
@@ -153,11 +161,21 @@ class _CADImportOptions:
     )
 
     # --- Scene -------------------------------------------------------------
-    recenter_origin: BoolProperty(
-        name="Recenter to Origin",
-        description="Move imported geometry so its bounding box center sits at world origin. "
-                    "Strongly recommended for CAD files with geographic coordinates",
-        default=True,
+    recenter_mode: EnumProperty(
+        name="Recenter",
+        description="How to position imported geometry relative to Blender's origin",
+        items=[
+            ("NONE", "No Recenter",
+             "Keep original CAD coordinates — CAD (0,0,0) maps to Blender (0,0,0). "
+             "Use when multiple files share the same coordinate system"),
+            ("BBOX", "Bbox Center to Origin",
+             "Move geometry so its bounding box center sits at world origin. "
+             "Best for files with geographic/project coordinates far from zero"),
+            ("MIN_CORNER", "Min Corner to Origin",
+             "Move geometry so its bottom-left bounding box corner sits at origin. "
+             "Useful when you want the building corner at (0,0,0)"),
+        ],
+        default="BBOX",
     )
 
     join_by_layer: BoolProperty(
@@ -196,7 +214,7 @@ class IMPORT_OT_dxf(Operator, ImportHelper, _CADImportOptions):
         else:
             self.units_mode = "MANUAL"
             self.manual_scale = prefs.default_scale
-        self.recenter_origin = prefs.default_recenter
+        self.recenter_mode = "BBOX" if prefs.default_recenter else "NONE"
         return super().invoke(context, event)
 
     def draw(self, context):
@@ -224,6 +242,8 @@ class IMPORT_OT_dxf(Operator, ImportHelper, _CADImportOptions):
         elapsed = time.perf_counter() - t0
         if self.frame_after_import and all_created:
             _frame_view_on(context, all_created)
+        if self.color_by_layer and all_created:
+            _enable_object_color_shading(context)
 
         self.report(
             {"INFO"},
@@ -274,7 +294,7 @@ class IMPORT_OT_dwg(Operator, ImportHelper, _CADImportOptions):
         else:
             self.units_mode = "MANUAL"
             self.manual_scale = prefs.default_scale
-        self.recenter_origin = prefs.default_recenter
+        self.recenter_mode = "BBOX" if prefs.default_recenter else "NONE"
         return super().invoke(context, event)
 
     def draw(self, context):
@@ -349,6 +369,8 @@ class IMPORT_OT_dwg(Operator, ImportHelper, _CADImportOptions):
         elapsed = time.perf_counter() - t0
         if self.frame_after_import and all_created:
             _frame_view_on(context, all_created)
+        if self.color_by_layer and all_created:
+            _enable_object_color_shading(context)
 
         self.report(
             {"INFO"},
@@ -373,6 +395,7 @@ def _draw_import_panel(layout, op):
     box.label(text="Layers", icon="OUTLINER")
     box.prop(op, "layer_mode")
     box.prop(op, "layer_filter")
+    box.prop(op, "color_by_layer")
     box.prop(op, "skip_hidden_layers")
 
     box = layout.box()
@@ -389,7 +412,7 @@ def _draw_import_panel(layout, op):
 
     box = layout.box()
     box.label(text="Scene", icon="SCENE_DATA")
-    box.prop(op, "recenter_origin")
+    box.prop(op, "recenter_mode")
     box.prop(op, "join_by_layer")
     box.prop(op, "frame_after_import")
 
@@ -440,6 +463,36 @@ def _should_skip_layer(layer_name, include, exclude, layer_obj, skip_hidden) -> 
         if layer_obj.is_off() or layer_obj.is_frozen() or layer_obj.is_locked():
             return True
     return False
+
+
+# ============================================================================
+# Viewport: switch solid shading to Object color (so obj.color is visible)
+# ============================================================================
+def _enable_object_color_shading(context):
+    """
+    Set every 3D viewport's solid-mode color to 'OBJECT' so the per-object
+    colors set by Color-by-Layer actually show.
+
+    Two properties are needed:
+      - color_type           → tints meshes/surfaces (3DFACE, SOLID, beveled curves)
+      - wireframe_color_type → tints curve wireframes (LINE, ARC, POLYLINE...)
+    Most CAD imports are curves, so wireframe_color_type is the important one.
+    Only touches solid shading; material/rendered modes are untouched.
+    """
+    for area in context.screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        for space in area.spaces:
+            if space.type != "VIEW_3D":
+                continue
+            try:
+                space.shading.color_type = "OBJECT"
+            except (AttributeError, TypeError):
+                pass
+            try:
+                space.shading.wireframe_color_type = "OBJECT"
+            except (AttributeError, TypeError):
+                pass
 
 
 # ============================================================================
@@ -538,7 +591,7 @@ def _do_import_dxf(context, filepath: str, op):
     root = bpy.data.collections.new(root_name)
     context.scene.collection.children.link(root)
 
-    layer_mgr = layers.LayerManager(op.layer_mode, root)
+    layer_mgr = layers.LayerManager(op.layer_mode, root, color_by_layer=op.color_by_layer)
     include, exclude = _parse_layer_filter(op.layer_filter)
 
     dxf_layers = {name: rgb for name, rgb in doc.iter_layers()}
@@ -607,13 +660,15 @@ def _do_import_dxf(context, filepath: str, op):
     if op.join_by_layer and op.layer_mode == "COLLECTIONS":
         created = _join_objects_per_layer(context, per_layer_objs)
 
-    if op.recenter_origin and created:
-        _recenter(created)
+    if op.recenter_mode != "NONE" and created:
+        _recenter(created, op.recenter_mode, scale)
 
     return len(created), created
 
 
 def _build_block_collection(block_def, parent_collection, scale, op):
+    from .core.reader import _aci_to_rgb  # imported once per block, not per entity
+
     coll = bpy.data.collections.new(f"BLOCK_{block_def.name}")
     parent_collection.children.link(coll)
 
@@ -630,6 +685,18 @@ def _build_block_collection(block_def, parent_collection, scale, op):
         if obj is None:
             continue
         coll.objects.link(obj)
+        # Tint block geometry by its own entity color (ACI), if enabled.
+        # Block entities are often BYLAYER/BYBLOCK; fall back to a neutral tint.
+        if op.color_by_layer:
+            try:
+                aci = getattr(entity.dxf, "color", 256)  # 256 = BYLAYER
+                if aci in (0, 256, None):  # BYBLOCK / BYLAYER / unset
+                    obj.color = (0.8, 0.8, 0.8, 1.0)
+                else:
+                    r, g, b = _aci_to_rgb(aci)
+                    obj.color = (r, g, b, 1.0)
+            except (AttributeError, TypeError, ValueError):
+                pass
         count += 1
 
     if count == 0:
@@ -701,8 +768,19 @@ def _join_objects_per_layer(context, per_layer_objs):
     return result
 
 
-def _recenter(objects):
+def _recenter(objects, mode: str = "BBOX", scale: float = 1.0):
+    """
+    Reposition imported geometry:
+        NONE       — do nothing (CAD origin already = Blender origin after scale)
+        BBOX       — shift bounding box center to world origin
+        MIN_CORNER — shift bounding box min corner to world origin
+    """
+    if mode == "NONE":
+        return
+
     bpy.context.view_layer.update()
+
+    # Compute world-space bounding box across all objects
     min_co = Vector((float("inf"),) * 3)
     max_co = Vector((float("-inf"),) * 3)
     for obj in objects:
@@ -717,11 +795,19 @@ def _recenter(objects):
             for i in range(3):
                 min_co[i] = min(min_co[i], wv[i])
                 max_co[i] = max(max_co[i], wv[i])
+
     if min_co.x == float("inf"):
         return
-    center = (min_co + max_co) * 0.5
+
+    if mode == "BBOX":
+        offset = (min_co + max_co) * 0.5
+    elif mode == "MIN_CORNER":
+        offset = min_co
+    else:
+        return
+
     for obj in objects:
-        obj.location -= center
+        obj.location -= offset
 
 
 # ============================================================================
