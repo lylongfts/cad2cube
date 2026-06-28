@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "cad2cube"
-version = "1.2.2"
+version = "1.4.1"
 name = "CAD2Cube — DXF / DWG Importer"
 tagline = "Free DXF and DWG importer with layers, units and block instances"
 maintainer = "Long Live The Cube <https://www.youtube.com/@longlivethecube>"

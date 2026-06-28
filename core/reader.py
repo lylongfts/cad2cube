@@ -91,7 +91,7 @@ class DXFDocument:
             layer_count=len(self._doc.layers),
             block_count=sum(
                 1 for b in self._doc.blocks
-                if not b.name.startswith("*")  # skip anonymous/model/paper
+                if not _is_layout_block(b.name)
             ),
         )
 
@@ -119,14 +119,31 @@ class DXFDocument:
             return None
 
     def iter_block_definitions(self) -> Iterator:
-        """User-defined blocks only (skips *Model_Space, *Paper_Space, etc)."""
+        """
+        Yield user-defined and dynamic-block definitions.
+
+        Skips only the model/paper space layout blocks. Anonymous blocks
+        like *U10, *D24 (the baked geometry of AutoCAD dynamic blocks) are
+        KEPT, because INSERT entities reference them directly.
+        """
         for block in self._doc.blocks:
-            if not block.name.startswith("*"):
-                yield block
+            if _is_layout_block(block.name):
+                continue
+            yield block
+
+
+# --- Block name helpers -----------------------------------------------------
+def _is_layout_block(name: str) -> bool:
+    """
+    True for the model/paper space layout blocks that must never be imported
+    as geometry. Everything else — including anonymous dynamic-block defs
+    like *U10, *D24, *E5 — is real geometry we want.
+    """
+    upper = name.upper()
+    return upper.startswith("*MODEL_SPACE") or upper.startswith("*PAPER_SPACE")
 
 
 # --- ACI color palette ------------------------------------------------------
-# AutoCAD Color Index 1-255 -> RGB. Just the first 10 colors + a fallback;
 # full palette is in ezdxf.colors if higher fidelity matters in v2.
 _ACI_BASIC = {
     1: (1.0, 0.0, 0.0),     # red

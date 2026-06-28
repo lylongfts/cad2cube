@@ -131,6 +131,20 @@ class _CADImportOptions:
         default=False,
     )
 
+    hatch_mode: EnumProperty(
+        name="Import HATCH",
+        description="How to handle HATCH fill regions",
+        items=[
+            ("NONE", "None", "Skip all hatches"),
+            ("SOLID", "Solid hatches only",
+             "Import only hatches that are already solid fills (recommended)"),
+            ("ALL_AS_SOLID", "All hatches as solid",
+             "Import every hatch as a solid fill, including pattern hatches "
+             "(pattern lines are dropped, only the filled boundary is kept)"),
+        ],
+        default="SOLID",
+    )
+
     color_by_layer: BoolProperty(
         name="Color by Layer",
         description="Tint objects with their CAD layer color in the viewport "
@@ -415,6 +429,7 @@ def _draw_import_panel(layout, op):
     row = box.row(align=True)
     row.prop(op, "import_text", toggle=True)
     row.prop(op, "import_points", toggle=True)
+    box.prop(op, "hatch_mode")
     box.prop(op, "curve_resolution")
     box.prop(op, "flatten_z")
 
@@ -656,6 +671,7 @@ def _do_import_dxf(context, filepath: str, op):
                 curve_resolution=op.curve_resolution,
                 import_text=op.import_text,
                 flatten_z=op.flatten_z,
+                hatch_mode=op.hatch_mode,
             )
 
         if obj is None:
@@ -680,12 +696,16 @@ def _build_block_collection(block_def, parent_collection, scale, op):
     count = 0
     for entity in block_def:
         if entity.dxftype() == "INSERT":
+            # Nested block: bake its geometry into this collection, transformed
+            # to the nested insert's position. Common in dynamic blocks.
+            count += _bake_nested_insert(entity, block_def, coll, scale, op, _doc=block_def.doc)
             continue
         obj = converters.convert_entity(
             entity, scale,
             curve_resolution=op.curve_resolution,
             import_text=op.import_text,
             flatten_z=op.flatten_z,
+            hatch_mode=op.hatch_mode,
         )
         if obj is None:
             continue
@@ -708,6 +728,73 @@ def _build_block_collection(block_def, parent_collection, scale, op):
         bpy.data.collections.remove(coll)
         return None
     return coll
+
+
+def _bake_nested_insert(insert_entity, parent_block, target_coll, scale, op, _doc, _depth=0):
+    """
+    Bake a nested INSERT's geometry directly into target_coll, transformed
+    to the nested insert's local position/rotation/scale. Recurses up to a
+    safe depth to handle blocks nested inside blocks (dynamic blocks do this).
+    Returns the number of objects added.
+    """
+    import math
+    from mathutils import Matrix, Vector as V
+
+    if _depth > 5:  # guard against pathological/circular nesting
+        return 0
+
+    nested_name = insert_entity.dxf.name
+    try:
+        nested_block = _doc.blocks.get(nested_name)
+    except Exception:
+        return 0
+    if nested_block is None:
+        return 0
+
+    # Build the nested insert's transform (in block-local space, no scaling of
+    # coordinates here — convert_entity already applies `scale` to points)
+    ins = insert_entity.dxf.insert
+    loc = V((ins[0] * scale, ins[1] * scale,
+             (0.0 if op.flatten_z else (ins[2] * scale if len(ins) > 2 else 0.0))))
+    rot_z = math.radians(getattr(insert_entity.dxf, "rotation", 0.0))
+    sx = getattr(insert_entity.dxf, "xscale", 1.0) or 1.0
+    sy = getattr(insert_entity.dxf, "yscale", 1.0) or 1.0
+    sz = getattr(insert_entity.dxf, "zscale", 1.0) or 1.0
+    xform = (Matrix.Translation(loc)
+             @ Matrix.Rotation(rot_z, 4, "Z")
+             @ Matrix.Diagonal((sx, sy, sz, 1.0)))
+
+    added = 0
+    for entity in nested_block:
+        if entity.dxftype() == "INSERT":
+            added += _bake_nested_insert(entity, nested_block, target_coll,
+                                         scale, op, _doc, _depth + 1)
+            continue
+        obj = converters.convert_entity(
+            entity, scale,
+            curve_resolution=op.curve_resolution,
+            import_text=op.import_text,
+            flatten_z=op.flatten_z,
+            hatch_mode=op.hatch_mode,
+        )
+        if obj is None:
+            continue
+        # Apply the nested transform to the object's geometry
+        obj.matrix_world = xform @ obj.matrix_world
+        target_coll.objects.link(obj)
+        if op.color_by_layer:
+            try:
+                aci = getattr(entity.dxf, "color", 256)
+                if aci in (0, 256, None):
+                    obj.color = (0.8, 0.8, 0.8, 1.0)
+                else:
+                    r, g, b = _aci_to_rgb(aci)
+                    obj.color = (r, g, b, 1.0)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        added += 1
+
+    return added
 
 
 def _expand_block_in_place(block_def, insert_entity, scale, op, layer_mgr, dxf_layers, created):
@@ -738,6 +825,7 @@ def _expand_block_in_place(block_def, insert_entity, scale, op, layer_mgr, dxf_l
             curve_resolution=op.curve_resolution,
             import_text=op.import_text,
             flatten_z=op.flatten_z,
+            hatch_mode=op.hatch_mode,
         )
         if obj is None:
             continue
@@ -841,8 +929,13 @@ def _recenter(objects, mode: str = "BBOX", scale: float = 1.0):
         elif obj.type == "EMPTY":
             # Plain empty (e.g. POINT): shift location, no data to transform
             obj.location -= offset
+        elif obj.type == "FONT":
+            # Text objects position via obj.location (data sits at local origin),
+            # so shift the location like empties — NOT the data.
+            obj.location -= offset
         elif obj.data is not None and obj.data not in transformed_data:
-            # Mesh/Curve/Font: transform the data so obj.location stays clean
+            # Mesh/Curve: geometry lives in the data, transform it so
+            # obj.location stays clean at the origin.
             obj.data.transform(translate)
             transformed_data.add(obj.data)
         # Else: shared data already transformed by an earlier sibling

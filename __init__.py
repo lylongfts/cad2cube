@@ -21,7 +21,7 @@ License: GPL-3.0-or-later
 bl_info = {
     "name": "CAD2Cube — DXF / DWG Importer",
     "author": "Long Live The Cube",
-    "version": (1, 2, 2),
+    "version": (1, 4, 1),
     "blender": (4, 2, 0),
     "location": "File > Import > CAD2Cube (.dxf, .dwg)",
     "description": "Import DXF and DWG with layers, units, and block support. Free forever.",

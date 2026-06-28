@@ -28,11 +28,17 @@ def convert_entity(
     curve_resolution: int = 32,
     import_text: bool = True,
     flatten_z: bool = False,
+    hatch_mode: str = "SOLID",
 ) -> Optional[bpy.types.Object]:
     """
     Convert a DXF entity to a Blender object. Returns None if unsupported
     or if the entity should be skipped (e.g. TEXT when import_text=False).
     The returned object is NOT yet linked to any collection.
+
+    hatch_mode:
+        "NONE"          skip all hatches
+        "SOLID"         only import hatches that are already solid fills
+        "ALL_AS_SOLID"  import every hatch as a solid fill (pattern lines dropped)
     """
     dxftype = entity.dxftype()
 
@@ -64,9 +70,15 @@ def convert_entity(
         if dxftype in ("TEXT", "MTEXT") and import_text:
             return _text(entity, scale, flatten_z)
 
+        if dxftype == "HATCH":
+            if hatch_mode == "NONE":
+                return None
+            return _hatch(entity, scale, curve_resolution, flatten_z,
+                          force_all=(hatch_mode == "ALL_AS_SOLID"))
+
     except Exception as e:
         # One bad entity should not abort the entire import.
-        print(f"[CAD Importer] Skipped {dxftype}: {e}")
+        print(f"[CAD2Cube] Skipped {dxftype}: {e}")
         return None
 
     return None  # Unsupported entity type
@@ -274,6 +286,181 @@ def _text(entity, scale, flatten_z) -> bpy.types.Object:
     rotation = math.radians(getattr(entity.dxf, "rotation", 0.0))
     obj.rotation_euler.z = rotation
     return obj
+
+
+# --- HATCH (solid fill) → mesh ----------------------------------------------
+def _hatch(entity, scale, resolution, flatten_z, force_all=False) -> Optional[bpy.types.Object]:
+    """
+    Convert a HATCH to a Blender mesh.
+
+    force_all=False : only solid-fill hatches are imported (pattern hatches skipped)
+    force_all=True  : every hatch is imported as solid (pattern lines dropped,
+                      only the filled boundary is kept)
+
+    Boundary paths come in two flavors from ezdxf:
+        - PolylinePath : a closed list of vertices (the common case)
+        - EdgePath     : a sequence of LINE / ARC / ELLIPSE / SPLINE edges
+
+    Each path becomes one polygon. Multiple paths in one HATCH become
+    separate faces in the same mesh (islands/holes are approximated as
+    additional faces — true boolean holes are out of scope for v1).
+    """
+    # Skip non-solid (pattern) hatches unless force_all is set.
+    if not force_all:
+        is_solid = getattr(entity.dxf, "solid_fill", 0) == 1
+        pattern_name = getattr(entity.dxf, "pattern_name", "")
+        if not is_solid and pattern_name.upper() != "SOLID":
+            return None
+
+    # HATCH elevation in ezdxf is a Vec3 point, not a scalar.
+    # The z-height is its .z component.
+    z = 0.0
+    if not flatten_z:
+        elev = getattr(entity.dxf, "elevation", None)
+        if elev is not None:
+            elev_z = getattr(elev, "z", None)
+            if elev_z is None:
+                # Fallback: maybe it's a tuple/sequence
+                try:
+                    elev_z = elev[2]
+                except (TypeError, IndexError, KeyError):
+                    elev_z = 0.0
+            z = float(elev_z) * scale
+
+    all_verts = []
+    all_faces = []
+
+    for path in entity.paths:
+        loop = _hatch_path_to_points(path, scale, resolution)
+        if loop is None or len(loop) < 3:
+            continue
+
+        # De-duplicate a trailing point that equals the first (closed loop)
+        if len(loop) > 1 and (loop[0] - loop[-1]).length < 1e-9:
+            loop = loop[:-1]
+        if len(loop) < 3:
+            continue
+
+        base = len(all_verts)
+        for p in loop:
+            all_verts.append((p.x, p.y, z))
+        all_faces.append(list(range(base, base + len(loop))))
+
+    if not all_verts or not all_faces:
+        return None
+
+    mesh = bpy.data.meshes.new("DXF_Hatch")
+    mesh.from_pydata(all_verts, [], all_faces)
+    mesh.update()
+
+    # n-gon faces from CAD boundaries are often non-planar or concave;
+    # validate cleans up anything Blender can't represent.
+    mesh.validate(verbose=False)
+
+    return bpy.data.objects.new("DXF_Hatch", mesh)
+
+
+def _hatch_path_to_points(path, scale, resolution):
+    """
+    Turn one HATCH boundary path into a list of mathutils.Vector points (2D->3D
+    with z handled by caller). Returns None if the path type is unsupported.
+    """
+    path_type = type(path).__name__
+
+    # PolylinePath: has .vertices = [(x, y, bulge), ...]
+    if path_type == "PolylinePath":
+        pts = []
+        for v in path.vertices:
+            x, y = _xy(v)
+            pts.append(Vector((x * scale, y * scale, 0.0)))
+        return pts
+
+    # EdgePath: a list of edges (LineEdge, ArcEdge, EllipseEdge, SplineEdge)
+    if path_type == "EdgePath":
+        pts = []
+        for edge in path.edges:
+            edge_type = type(edge).__name__
+
+            if edge_type == "LineEdge":
+                x, y = _xy(edge.start)
+                pts.append(Vector((x * scale, y * scale, 0.0)))
+                # end point is added by the next edge's start, or final closure
+
+            elif edge_type == "ArcEdge":
+                pts.extend(_sample_arc_edge(edge, scale, resolution))
+
+            elif edge_type == "EllipseEdge":
+                pts.extend(_sample_ellipse_edge(edge, scale, resolution))
+
+            elif edge_type == "SplineEdge":
+                # Approximate spline by its control/fit points
+                fit = getattr(edge, "fit_points", None) or getattr(edge, "control_points", [])
+                for p in fit:
+                    x, y = _xy(p)
+                    pts.append(Vector((x * scale, y * scale, 0.0)))
+
+        return pts
+
+    return None
+
+
+def _xy(point) -> tuple[float, float]:
+    """
+    Extract (x, y) as plain floats from any ezdxf point representation.
+    ezdxf returns Vec2/Vec3 objects whose indexing can yield Vec objects,
+    not floats — so prefer the .x/.y attributes when present.
+    """
+    if hasattr(point, "x") and hasattr(point, "y"):
+        return float(point.x), float(point.y)
+    return float(point[0]), float(point[1])
+
+
+def _sample_arc_edge(edge, scale, resolution):
+    """Sample an ArcEdge boundary into points."""
+    cx, cy = _xy(edge.center)
+    r = edge.radius
+    start = math.radians(edge.start_angle)
+    end = math.radians(edge.end_angle)
+    ccw = getattr(edge, "ccw", True)
+
+    if ccw:
+        if end < start:
+            end += 2 * math.pi
+    else:
+        if start < end:
+            start += 2 * math.pi
+
+    span = abs(end - start)
+    steps = max(2, int(resolution * span / (2 * math.pi)))
+    pts = []
+    for i in range(steps + 1):
+        a = start + (end - start) * (i / steps)
+        pts.append(Vector(((cx + math.cos(a) * r) * scale,
+                           (cy + math.sin(a) * r) * scale, 0.0)))
+    return pts
+
+
+def _sample_ellipse_edge(edge, scale, resolution):
+    """Sample an EllipseEdge boundary into points."""
+    cx, cy = _xy(edge.center)
+    mx, my = _xy(edge.major_axis)
+    major = Vector((mx, my, 0.0))
+    ratio = edge.ratio
+    minor = Vector((-major.y, major.x, 0.0)) * ratio
+
+    start = edge.start_param
+    end = edge.end_param
+    if end < start:
+        end += 2 * math.pi
+
+    span = abs(end - start)
+    steps = max(2, int(resolution * span / (2 * math.pi)))
+    pts = []
+    for i in range(steps + 1):
+        t = start + (end - start) * (i / steps)
+        p = Vector((cx, cy, 0.0)) + major * math.cos(t) + minor * math.sin(t)
+        pts.append(Vector((p.x * scale, p.y * scale, 0.0)))
+    return pts
 
 
 # --- INSERT (block reference) → collection instance -------------------------

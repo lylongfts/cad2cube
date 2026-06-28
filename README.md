@@ -75,9 +75,9 @@ Recommended settings for architectural drawings:
 ## Supported entities
 
 LINE, LWPOLYLINE, POLYLINE (2D/3D), CIRCLE, ARC, ELLIPSE, SPLINE, POINT,
-3DFACE, SOLID, TEXT, MTEXT, INSERT (blocks).
+3DFACE, SOLID, TEXT, MTEXT, INSERT (blocks), HATCH (solid + force-all modes).
 
-Planned: HATCH, DIMENSION, LEADER, 3DSOLID, nested blocks.
+Planned: pattern hatches, DIMENSION, LEADER, 3DSOLID, nested blocks.
 
 ## Tutorials
 
