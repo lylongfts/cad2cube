@@ -23,6 +23,8 @@ crashes on modern files, and has no hatch import, no layer mapping, and no unit 
 - 🎨 **HATCH import overhauled** — filled regions (rooms, slabs, walls) now come in as real editable mesh faces, not just outlines. Default mode is "All as solid" so nothing gets skipped.
 - 📦 **Nested block instancing** — complex drawings with hundreds of inserts no longer explode your scene into thousands of objects
 - 🏔️ **Merge 3D Faces** — Civil 3D terrain TIN surfaces weld into a single clean mesh instead of 50k separate faces
+> [!NOTE]
+> **Important Update (v1.5.0):** To comply with the official Blender Extensions platform guidelines regarding third-party software and security, native DWG support via the ODA converter has been removed. This plugin is now a 100% standalone, ultra-safe, and lightweight DXF Importer. If you still need DWG import support, please download and use **v1.4.5** from the releases page.
 
 ## Why CAD2Cube
 
